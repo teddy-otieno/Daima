@@ -1,8 +1,11 @@
 [package]
-name = "Daima"
+name = "daima"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+crossbeam-channel = "0.5"
+sysinfo = "0.26.2"
+bus = "2.3.0"
