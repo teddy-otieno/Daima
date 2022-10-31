@@ -1,20 +1,27 @@
 use std::{
-    thread::{self, JoinHandle, Thread},
-    vec, time::Duration,
+    sync::{Arc, RwLock},
+    thread::{self, JoinHandle, yield_now},
+    time::Duration,
+    usize, vec,
 };
+use itertools::Itertools;
 
-use super::system::System;
+use super::{components::SampleComponent, system::System};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use sysinfo::{System as HardWareSystem, SystemExt};
+
+const TOTAL_ENTITIES: usize = 1_000;
 
 #[derive(Clone, Copy)]
 enum GameStateEvent {}
 
 #[derive(Debug, Clone, Copy)]
-pub enum SystemEvent {}
+pub enum SystemEvent {
+    ShutdownEngine,
+}
 
 struct Worker {
-    join_handle: JoinHandle<()>,
+    _join_handle: JoinHandle<()>,
 }
 
 /**
@@ -26,46 +33,52 @@ struct Worker {
 struct SystemManager {
     tick_broadcast_bus: bus::Bus<usize>,
     game_state_broadcast_bus: bus::Bus<Vec<GameStateEvent>>,
-    game_tick_channel: (Sender<usize>, Receiver<usize>),
-    game_state_channel: (Sender<Vec<GameStateEvent>>, Receiver<Vec<GameStateEvent>>),
     system_events_channel: (Sender<Vec<SystemEvent>>, Receiver<Vec<SystemEvent>>),
     thread_count: usize,
-    systems: Vec<System>,
+    no_of_systems: Option<usize>,
     workers: Vec<Worker>,
 }
 
 impl SystemManager {
-    fn new(thread_count: usize, systems: Vec<System>) -> Self {
-        let size_of_sys_event_channel = if systems.len() < thread_count {
-            1
-        } else {
-            systems.len() / thread_count
-        };
-
+    fn new(thread_count: usize) -> Self {
         Self {
             tick_broadcast_bus: bus::Bus::new(1),
             game_state_broadcast_bus: bus::Bus::new(1),
-            game_tick_channel: bounded(0),
-            game_state_channel: bounded(1),
             system_events_channel: bounded(10),
             thread_count,
-            systems,
+            no_of_systems: None,
             workers: vec![],
-        }
-    }
-
-    fn events_channel_size(&self) -> usize {
-        if self.systems.len() < self.thread_count {
-            1
-        } else {
-            self.systems.len() / self.thread_count
         }
     }
 }
 
+struct EntityID {
+    id: usize,
+    gen: usize,
+}
+
+impl EntityID {}
+
+pub struct EntityManager {
+    entities: Vec<EntityID>,
+    render_components: Vec<SampleComponent>,
+}
+
+impl EntityManager {
+    fn new() -> Self {
+        Self {
+            entities: Vec::with_capacity(TOTAL_ENTITIES),
+            render_components: Vec::with_capacity(TOTAL_ENTITIES),
+        }
+    }
+}
+
+pub type EntityManagerRef = Arc<RwLock<EntityManager>>;
+
 pub struct Engine {
     systems_manager: SystemManager,
     previous_tick: usize,
+    entity_manager: EntityManagerRef,
 }
 
 /*
@@ -88,64 +101,88 @@ impl Engine {
         let mut events = vec![];
 
         let mut counter = 0;
-        while let Ok(new_events) = self.systems_manager.system_events_channel.1.recv_timeout(Duration::from_millis(16)) {
+        while let Ok(new_events) = self
+            .systems_manager
+            .system_events_channel
+            .1
+            .recv_timeout(Duration::from_millis(16))
+        {
             events.extend(new_events);
             counter += 1;
 
-            if counter == self.systems_manager.events_channel_size() {
+            if counter == Self::events_channel_size(self.systems_manager.no_of_systems.unwrap(), self.systems_manager.thread_count) {
                 break;
             }
         }
-
-
     }
 
-    fn setup_systems(&mut self) {
+    #[inline]
+    fn events_channel_size(no_of_systems: usize, thread_count: usize) -> usize {
+        if no_of_systems > thread_count {
+            no_of_systems / thread_count
+        } else {
+            no_of_systems
+        }
+    }
+
+    fn setup_systems(&mut self, systems: Vec<System>) {
         //Divide the systems across the available systems threads
         //Give the render system thread its own dedicated thread
-        let systems_per_thread =
-            if self.systems_manager.systems.len() > self.systems_manager.thread_count {
-                self.systems_manager.systems.len() / self.systems_manager.thread_count
-            } else {
-                self.systems_manager.systems.len()
-            };
 
-        for (i ,systems) in self.systems_manager.systems.chunks(systems_per_thread).enumerate() {
-            let mut systems = systems.to_owned();
+        let size_of_systems = systems.len();
+        self.systems_manager.no_of_systems = Some(size_of_systems);
+
+        for (i, mut systems) in systems
+            .into_iter()
+            .chunks(Self::events_channel_size(size_of_systems, self.systems_manager.thread_count))
+            .into_iter()
+            .map(|chunk| chunk.collect::<Vec<System>>())
+            .enumerate()
+        {
             let system_event_sender = self.systems_manager.system_events_channel.0.clone();
 
             let mut game_state_receiver = self.systems_manager.game_state_broadcast_bus.add_rx();
             let mut game_tick_receiver = self.systems_manager.tick_broadcast_bus.add_rx();
 
-            let worker = Worker {
-                join_handle: thread::spawn(move || {
-                    //Thread is crushing for some unknown reason
-                    //Invalid writes to a memory address.
-                    //The crash only appears when the debugger is active
+            //Thread is crushing for some unknown reason
+            //Invalid writes to a memory address.
+            //The crash only appears when the debugger is active
 
-                    let mut event_buffer: Vec<SystemEvent> = vec![];
-                    loop {
-                        let tick_time = game_tick_receiver.recv().unwrap();
-                        println!("Updated: Thread {}", i);
-                        let _game_state_events = game_state_receiver.recv().unwrap();
+            let entities_ref = self.entity_manager.clone();
 
-                        for system in &mut systems {
-                            match system.update(tick_time) {
-                                Ok(events) => event_buffer.extend(events),
-                                Err(_error) => {
-                                    //TODO: Log the errors
-                                }
+            let worker_handle = thread::spawn(move || {
+                for system in systems.iter_mut() {
+                    system.init();
+                }
+
+                let mut event_buffer: Vec<SystemEvent> = vec![];
+                loop {
+                    let tick_time = game_tick_receiver.recv().unwrap();
+                    println!("Updated: Thread {}", i);
+                    let _game_state_events = game_state_receiver.recv().unwrap();
+
+                    for system in systems.iter_mut() {
+                        match system.update(tick_time, &entities_ref) {
+                            Ok(events) => event_buffer.extend(events),
+                            Err(_error) => {
+                                //TODO: Log the errors
                             }
                         }
-
-                        //NOTE: (teddy) this is a temporary fix
-                        //Should invenstigate the blocking problem 
-                        if let Ok(_) =  system_event_sender.send_timeout(event_buffer.clone(), Duration::from_millis(16)) {
-                            println!("Sending was successful");
-                            event_buffer.clear();
-                        }                     
                     }
-                }),
+
+                    //NOTE: (teddy) this is a temporary fix
+                    //Should invenstigate the blocking problem
+                    if let Ok(_) = system_event_sender
+                        .send_timeout(event_buffer.clone(), Duration::from_millis(16))
+                    {
+                        println!("Sending was successful");
+                        event_buffer.clear();
+                    }
+                }
+            });
+
+            let worker = Worker {
+                _join_handle: worker_handle,
             };
 
             self.systems_manager.workers.push(worker);
@@ -173,10 +210,12 @@ impl EngineBuilder {
         let mut sys = HardWareSystem::new_all();
         sys.refresh_cpu();
         let mut engine = Engine {
-            systems_manager: SystemManager::new(sys.cpus().len(), self.systems),
+            systems_manager: SystemManager::new(sys.cpus().len()),
             previous_tick: 0,
+            entity_manager: Arc::new(RwLock::new(EntityManager::new())),
         };
-        engine.setup_systems();
+        let temp = self.systems;
+        engine.setup_systems(temp);
         engine
     }
 }

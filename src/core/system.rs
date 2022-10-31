@@ -1,9 +1,12 @@
-use super::engine::SystemEvent;
+use crate::systems::render::RenderSystem;
 
-type SysResult<T> = Result<T, SystemError>;
+use super::engine::{Engine, EntityManager, EntityManagerRef, SystemEvent};
+
+pub type SysResult<T> = Result<T, SystemError>;
 
 pub trait SystemTrait {
-    fn step(&mut self, time: usize) -> SysResult<Vec<SystemEvent>>;
+    fn init(&mut self) {}
+    fn step(&mut self, time: usize, entities: &EntityManagerRef) -> SysResult<Vec<SystemEvent>>;
 }
 
 #[derive(Clone, Debug)]
@@ -11,7 +14,7 @@ pub struct SampleSystem {
     pub(crate) name: String,
 }
 impl SystemTrait for SampleSystem {
-    fn step(&mut self, time: usize) -> SysResult<Vec<SystemEvent>> {
+    fn step(&mut self, time: usize, entities: &EntityManagerRef) -> SysResult<Vec<SystemEvent>> {
         println!("{:?} stepped", self);
         Ok(vec![])
     }
@@ -25,15 +28,28 @@ pub struct SystemError {
     description: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum System {
     SampleSystem(SampleSystem),
+    RenderSystem(RenderSystem),
 }
 
 impl System {
-    pub fn update(&mut self, time: usize) -> Result<Vec<SystemEvent>, SystemError> {
+    pub fn init(&mut self) {
         match self {
-            System::SampleSystem(sys) => sys.step(time),
+            System::SampleSystem(sys) => sys.init(),
+            System::RenderSystem(sys) => sys.init(),
+        }
+    }
+
+    pub fn update(
+        &mut self,
+        time: usize,
+        entities: &EntityManagerRef,
+    ) -> Result<Vec<SystemEvent>, SystemError> {
+        match self {
+            System::SampleSystem(sys) => sys.step(time, entities),
+            System::RenderSystem(sys) => sys.step(time, entities),
         }
     }
 }
