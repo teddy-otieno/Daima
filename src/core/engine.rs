@@ -1,10 +1,11 @@
+use glfw::WindowEvent;
+use itertools::Itertools;
 use std::{
     sync::{Arc, RwLock},
-    thread::{self, JoinHandle, yield_now},
+    thread::{self, yield_now, JoinHandle},
     time::Duration,
     usize, vec,
 };
-use itertools::Itertools;
 
 use super::{components::SampleComponent, system::System};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -12,12 +13,15 @@ use sysinfo::{System as HardWareSystem, SystemExt};
 
 const TOTAL_ENTITIES: usize = 1_000;
 
-#[derive(Clone, Copy)]
-enum GameStateEvent {}
+#[derive(Debug, Clone)]
+pub enum GameStateEvent {
+    InputEvent(WindowEvent),
+}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum SystemEvent {
     ShutdownEngine,
+    EngineEvent(GameStateEvent),
 }
 
 struct Worker {
@@ -84,6 +88,8 @@ pub struct Engine {
 /*
     Rendering will have its own thread. Figure out how to create a seperate opengl context from the one
     used by the main thread.
+
+    TODO: (teddy) I'll need a channel for engine level events, this channel will only be used by the rendering for now
 */
 
 impl Engine {
@@ -110,8 +116,25 @@ impl Engine {
             events.extend(new_events);
             counter += 1;
 
-            if counter == Self::events_channel_size(self.systems_manager.no_of_systems.unwrap(), self.systems_manager.thread_count) {
+            let events_size = Self::events_channel_size(
+                self.systems_manager.no_of_systems.unwrap(),
+                self.systems_manager.thread_count,
+            );
+
+            if counter == events_size {
                 break;
+            }
+        }
+
+        dbg!(&events);
+
+        for event in events.iter() {
+            match event {
+                SystemEvent::ShutdownEngine => {
+                    //Close the engine. Implement a clean up function
+                    panic!("Closed");
+                }
+                e => continue,
             }
         }
     }
@@ -134,7 +157,10 @@ impl Engine {
 
         for (i, mut systems) in systems
             .into_iter()
-            .chunks(Self::events_channel_size(size_of_systems, self.systems_manager.thread_count))
+            .chunks(Self::events_channel_size(
+                size_of_systems,
+                self.systems_manager.thread_count,
+            ))
             .into_iter()
             .map(|chunk| chunk.collect::<Vec<System>>())
             .enumerate()
@@ -158,7 +184,7 @@ impl Engine {
                 let mut event_buffer: Vec<SystemEvent> = vec![];
                 loop {
                     let tick_time = game_tick_receiver.recv().unwrap();
-                    println!("Updated: Thread {}", i);
+                    //println!("Updated: Thread {}", i);
                     let _game_state_events = game_state_receiver.recv().unwrap();
 
                     for system in systems.iter_mut() {
@@ -175,7 +201,6 @@ impl Engine {
                     if let Ok(_) = system_event_sender
                         .send_timeout(event_buffer.clone(), Duration::from_millis(16))
                     {
-                        println!("Sending was successful");
                         event_buffer.clear();
                     }
                 }
