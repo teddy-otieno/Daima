@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use glfw::Context;
 
+use crate::core::engine::Engine;
 use crate::{
     core::{
         engine::{EntityManagerRef, SystemEvent},
@@ -38,7 +39,12 @@ impl SystemTrait for RenderSystem {
         }
     }
 
-    fn step(&mut self, time: usize, entities: &EntityManagerRef) -> SysResult<Vec<SystemEvent>> {
+    fn step(
+        &mut self,
+        time: usize,
+        entities: &EntityManagerRef,
+        engine: &Engine,
+    ) -> SysResult<Vec<SystemEvent>> {
         let GlfwWindowContext {
             window,
             glfw,
@@ -60,7 +66,7 @@ impl SystemTrait for RenderSystem {
             .collect::<Vec<SystemEvent>>();
 
         unsafe {
-            self.render_to_window();
+            self.render_to_window(engine);
         }
         Ok(window_events)
     }
@@ -79,11 +85,7 @@ impl RenderSystem {
 
     unsafe fn initialize_render_objects(&mut self) {
         //Rendering triangle
-        let vertices = [
-            -0.5, -0.5, 0.0, 
-            0.5, -0.5, 0.0, 
-            0.0, 0.5, 0.0 as f32
-        ];
+        let vertices = [-0.5, -0.5, 0.0, 0.5, -0.5, 0.0, 0.0, 0.5, 0.0 as f32];
 
         let mut vao = 0;
         gl::GenVertexArrays(1, &mut vao);
@@ -119,10 +121,12 @@ impl RenderSystem {
             #version 330 core
             layout (location = 0) in vec3 a_pos;
 
+            uniform mat4 mvp;
+
             out vec3 out_color;
 
             void main() {
-                gl_Position = vec4(a_pos.x, a_pos.y, a_pos.z, 1.0);
+                gl_Position = mvp * vec4(a_pos, 1.0);
                 out_color = vec3(abs(a_pos.x), abs(a_pos.y), abs(a_pos.z));
             }
             "#;
@@ -194,11 +198,22 @@ impl RenderSystem {
         self.shader_program = Some(shader_program);
     }
 
-    unsafe fn render_to_window(&mut self) {
-        gl::ClearColor(0.2, 0.4, 1.0, 1.0);
+    unsafe fn render_to_window(&mut self, engine: &Engine) {
+        let camera = engine.camera.clone();
+        let camera_lock = camera.read().unwrap();
+
+        gl::ClearColor(0.0, 0.0, 0.0, 1.0);
         gl::Clear(gl::COLOR_BUFFER_BIT);
 
+        //Bind view_matrix_here
+        let mvp_uniform_name = CString::new("mvp").unwrap();
+        let mvp_id =
+            gl::GetUniformLocation(self.shader_program.unwrap(), mvp_uniform_name.as_ptr());
+
         gl::UseProgram(self.shader_program.unwrap());
+        let view_matrix = camera_lock.look_matrix();
+        gl::UniformMatrix4fv(mvp_id, 1, gl::FALSE, view_matrix.as_ptr());
+
         gl::BindVertexArray(self.vao.unwrap());
         gl::DrawArrays(gl::TRIANGLES, 0, 3);
     }

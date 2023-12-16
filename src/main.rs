@@ -7,6 +7,7 @@ mod core;
 mod renderer;
 mod systems;
 
+use systems::assets::AssetLoaderSystem;
 use systems::render::RenderSystem;
 
 use crate::core::engine::EngineBuilder;
@@ -18,6 +19,7 @@ fn main() {
             name: "0".to_string(),
         }))
         .add_system(System::RenderSystem(RenderSystem::new()))
+        .add_system(System::AssetSystem(AssetLoaderSystem::new()))
         .build();
 
     loop {
