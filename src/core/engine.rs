@@ -1,16 +1,20 @@
+use itertools::Itertools;
 use std::{
+    collections::LinkedList,
     sync::{Arc, RwLock},
-    thread::{self, JoinHandle, yield_now},
-    time::Duration,
+    thread::{self, yield_now, JoinHandle},
+    time::{Duration, Instant},
     usize, vec,
 };
-use itertools::Itertools;
 
-use super::{components::SampleComponent, system::System};
+use super::{
+    components::{ComponentsData, RenderComponent},
+    system::System,
+};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use sysinfo::{System as HardWareSystem, SystemExt};
 
-const TOTAL_ENTITIES: usize = 1_000;
+pub const TOTAL_ENTITIES: usize = 1_000;
 
 #[derive(Clone, Copy)]
 enum GameStateEvent {}
@@ -52,6 +56,7 @@ impl SystemManager {
     }
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct EntityID {
     id: usize,
     gen: usize,
@@ -60,16 +65,35 @@ struct EntityID {
 impl EntityID {}
 
 pub struct EntityManager {
+    deleted_entities: LinkedList<EntityID>,
     entities: Vec<EntityID>,
-    render_components: Vec<SampleComponent>,
+    components: ComponentsData,
 }
 
+///We have to be careful to avoid any realocations withing the entities and render components
 impl EntityManager {
     fn new() -> Self {
         Self {
+            deleted_entities: LinkedList::new(),
             entities: Vec::with_capacity(TOTAL_ENTITIES),
-            render_components: Vec::with_capacity(TOTAL_ENTITIES),
+            components: ComponentsData::new(),
         }
+    }
+
+    fn create_entity(&mut self) -> EntityID {
+        if self.deleted_entities.len() > 0 {
+            let new_entity = self.deleted_entities.pop_front().unwrap();
+            self.entities[new_entity.id].gen += 1;
+            return new_entity;
+        }
+
+        let new_entity = EntityID {
+            id: self.entities.len(),
+            gen: 1,
+        };
+        self.entities.push(new_entity);
+
+        return new_entity;
     }
 }
 
@@ -79,6 +103,7 @@ pub struct Engine {
     systems_manager: SystemManager,
     previous_tick: usize,
     entity_manager: EntityManagerRef,
+    level_manager: Box<dyn LevelManager>,
 }
 
 /*
@@ -110,7 +135,12 @@ impl Engine {
             events.extend(new_events);
             counter += 1;
 
-            if counter == Self::events_channel_size(self.systems_manager.no_of_systems.unwrap(), self.systems_manager.thread_count) {
+            if counter
+                == Self::events_channel_size(
+                    self.systems_manager.no_of_systems.unwrap(),
+                    self.systems_manager.thread_count,
+                )
+            {
                 break;
             }
         }
@@ -128,16 +158,17 @@ impl Engine {
     fn setup_systems(&mut self, systems: Vec<System>) {
         //Divide the systems across the available systems threads
         //Give the render system thread its own dedicated thread
-
         let size_of_systems = systems.len();
         self.systems_manager.no_of_systems = Some(size_of_systems);
 
-        for (i, mut systems) in systems
+        let no_system_per_thread =
+            Self::events_channel_size(size_of_systems, self.systems_manager.thread_count);
+
+        for mut systems in systems
             .into_iter()
-            .chunks(Self::events_channel_size(size_of_systems, self.systems_manager.thread_count))
+            .chunks(no_system_per_thread)
             .into_iter()
             .map(|chunk| chunk.collect::<Vec<System>>())
-            .enumerate()
         {
             let system_event_sender = self.systems_manager.system_events_channel.0.clone();
 
@@ -158,7 +189,6 @@ impl Engine {
                 let mut event_buffer: Vec<SystemEvent> = vec![];
                 loop {
                     let tick_time = game_tick_receiver.recv().unwrap();
-                    println!("Updated: Thread {}", i);
                     let _game_state_events = game_state_receiver.recv().unwrap();
 
                     for system in systems.iter_mut() {
@@ -172,6 +202,7 @@ impl Engine {
 
                     //NOTE: (teddy) this is a temporary fix
                     //Should invenstigate the blocking problem
+                    //FIXME: (teddy) We should crash the program incase the send operation failed.
                     if let Ok(_) = system_event_sender
                         .send_timeout(event_buffer.clone(), Duration::from_millis(16))
                     {
@@ -188,19 +219,33 @@ impl Engine {
             self.systems_manager.workers.push(worker);
         }
     }
+
+    fn setup_level(&mut self) {
+        self.level_manager.load_resources();
+        self.level_manager.create_entities(&self.entity_manager);
+    }
 }
 
 pub struct EngineBuilder {
     systems: Vec<System>,
+    level_manager: Option<Box<dyn LevelManager>>,
 }
 
 impl EngineBuilder {
     pub fn builder() -> Self {
-        Self { systems: vec![] }
+        Self {
+            systems: vec![],
+            level_manager: None,
+        }
     }
 
     pub fn add_system(mut self, system: System) -> Self {
         self.systems.push(system);
+        self
+    }
+
+    pub fn set_level_manager(mut self, level_manager: Box<dyn LevelManager>) -> Self {
+        self.level_manager = Some(level_manager);
         self
     }
 
@@ -213,9 +258,18 @@ impl EngineBuilder {
             systems_manager: SystemManager::new(sys.cpus().len()),
             previous_tick: 0,
             entity_manager: Arc::new(RwLock::new(EntityManager::new())),
+            level_manager: self.level_manager.unwrap(),
         };
         let temp = self.systems;
         engine.setup_systems(temp);
+        engine.setup_level();
         engine
     }
+}
+
+//From the engines perspective...
+//The level manager will load the system and
+pub trait LevelManager {
+    fn load_resources(&mut self);
+    fn create_entities(&mut self, entity_manager: &EntityManagerRef);
 }

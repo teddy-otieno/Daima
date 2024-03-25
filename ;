@@ -107,19 +107,7 @@ unsafe fn draw_simple_triangle() {
     gl::AttachShader(shader_program, fragment_shader);
     gl::LinkProgram(shader_program);
 
-    gl::UseProgram(shader_program);
-    gl::BindVertexArray(vbo);
-
-    gl::VertexAttribPointer(
-        0,
-        3,
-        gl::FLOAT,
-        gl::FALSE,
-        (3 * std::mem::size_of::<f32>()) as i32,
-        0 as *const c_void,
-    );
-
-    gl::EnableVertexAttribArray(0);
+    gl:UseProgram(shader_program);
 }
 
 //TODO: (teddy) Initialize glfw and opengl

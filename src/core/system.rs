@@ -15,7 +15,6 @@ pub struct SampleSystem {
 }
 impl SystemTrait for SampleSystem {
     fn step(&mut self, time: usize, entities: &EntityManagerRef) -> SysResult<Vec<SystemEvent>> {
-        println!("{:?} stepped", self);
         Ok(vec![])
     }
 }
