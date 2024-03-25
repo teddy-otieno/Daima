@@ -1,27 +1,29 @@
+use glfw::WindowEvent;
 use itertools::Itertools;
 use std::{
     collections::LinkedList,
     sync::{Arc, RwLock},
     thread::{self, yield_now, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
     usize, vec,
 };
 
-use super::{
-    components::{ComponentsData, RenderComponent},
-    system::System,
-};
+use super::{camera::Camera, components::SampleComponent, system::System};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use sysinfo::{System as HardWareSystem, SystemExt};
 
 pub const TOTAL_ENTITIES: usize = 1_000;
 
-#[derive(Clone, Copy)]
-enum GameStateEvent {}
+#[derive(Debug, Clone)]
+pub enum GameStateEvent {
+    InputEvent(WindowEvent),
+}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum SystemEvent {
     ShutdownEngine,
+    EngineEvent(GameStateEvent),
+    AssetSystemEvent,
 }
 
 struct Worker {
@@ -99,16 +101,21 @@ impl EntityManager {
 
 pub type EntityManagerRef = Arc<RwLock<EntityManager>>;
 
+//TODO: (Teddy) Add detlta time parameter
+
+#[derive(Clone)]
 pub struct Engine {
-    systems_manager: SystemManager,
+    systems_manager: Arc<RwLock<SystemManager>>,
     previous_tick: usize,
     entity_manager: EntityManagerRef,
-    level_manager: Box<dyn LevelManager>,
+    pub camera: Arc<RwLock<Camera>>,
 }
 
 /*
     Rendering will have its own thread. Figure out how to create a seperate opengl context from the one
     used by the main thread.
+
+    TODO: (teddy) I'll need a channel for engine level events, this channel will only be used by the rendering for now
 */
 
 impl Engine {
@@ -118,16 +125,18 @@ impl Engine {
      *Update entit's components
      */
     pub fn update(&mut self) {
-        self.systems_manager.tick_broadcast_bus.broadcast(16);
-        self.systems_manager
+        let systems_manager = self.systems_manager.clone();
+        let mut systems_manager_lock = systems_manager.write().unwrap();
+
+        systems_manager_lock.tick_broadcast_bus.broadcast(16);
+        systems_manager_lock
             .game_state_broadcast_bus
             .broadcast(vec![]);
 
         let mut events = vec![];
 
         let mut counter = 0;
-        while let Ok(new_events) = self
-            .systems_manager
+        while let Ok(new_events) = systems_manager_lock
             .system_events_channel
             .1
             .recv_timeout(Duration::from_millis(16))
@@ -135,15 +144,54 @@ impl Engine {
             events.extend(new_events);
             counter += 1;
 
-            if counter
-                == Self::events_channel_size(
-                    self.systems_manager.no_of_systems.unwrap(),
-                    self.systems_manager.thread_count,
-                )
-            {
+            let events_size = Self::events_channel_size(
+                systems_manager_lock.no_of_systems.unwrap(),
+                systems_manager_lock.thread_count,
+            );
+
+            if counter == events_size {
                 break;
             }
         }
+
+        //dbg!(&events);
+
+        for event in events.iter() {
+            match event {
+                SystemEvent::ShutdownEngine => {
+                    //Close the engine. Implement a clean up function
+                    panic!("Closed");
+                }
+                SystemEvent::EngineEvent(GameStateEvent::InputEvent(e)) => {
+                    self.update_camera_movements(e);
+                }
+                //Check camera movement and update_camera
+                e => continue,
+            }
+        }
+    }
+
+    pub fn update_camera_movements(&mut self, e: &WindowEvent) {
+        let camera = self.camera.clone();
+        let camera_lock = camera.read().unwrap();
+
+        let mut new_camera_pos = camera_lock.pos;
+
+        match e {
+            WindowEvent::Key(glfw::Key::Up, _, _, _) => new_camera_pos += camera_lock.front * 0.1,
+            WindowEvent::Key(glfw::Key::Down, _, _, _) => new_camera_pos -= camera_lock.front * 0.1,
+            WindowEvent::Key(glfw::Key::Left, _, _, _) => {
+                new_camera_pos -= camera_lock.front.cross(&camera_lock.up).normalize() * 0.1;
+            }
+            WindowEvent::Key(glfw::Key::Right, _, _, _) => {
+                new_camera_pos += camera_lock.front.cross(&camera_lock.up).normalize() * 0.1;
+            }
+            _ => (),
+        }
+        drop(camera_lock);
+
+        let mut camera_lock = camera.write().unwrap();
+        camera_lock.pos = new_camera_pos;
     }
 
     #[inline]
@@ -155,31 +203,40 @@ impl Engine {
         }
     }
 
+    pub fn get_events() {
+        // self
+    }
+
     fn setup_systems(&mut self, systems: Vec<System>) {
         //Divide the systems across the available systems threads
         //Give the render system thread its own dedicated thread
+        let systems_manager = self.systems_manager.clone();
+        let mut systems_manager_lock = systems_manager.write().unwrap();
+
         let size_of_systems = systems.len();
-        self.systems_manager.no_of_systems = Some(size_of_systems);
+        systems_manager_lock.no_of_systems = Some(size_of_systems);
 
-        let no_system_per_thread =
-            Self::events_channel_size(size_of_systems, self.systems_manager.thread_count);
-
-        for mut systems in systems
+        for (i, mut systems) in systems
             .into_iter()
-            .chunks(no_system_per_thread)
+            .chunks(Self::events_channel_size(
+                size_of_systems,
+                systems_manager_lock.thread_count,
+            ))
             .into_iter()
             .map(|chunk| chunk.collect::<Vec<System>>())
         {
-            let system_event_sender = self.systems_manager.system_events_channel.0.clone();
+            let system_event_sender = systems_manager_lock.system_events_channel.0.clone();
 
-            let mut game_state_receiver = self.systems_manager.game_state_broadcast_bus.add_rx();
-            let mut game_tick_receiver = self.systems_manager.tick_broadcast_bus.add_rx();
+            let mut game_state_receiver = systems_manager_lock.game_state_broadcast_bus.add_rx();
+            let mut game_tick_receiver = systems_manager_lock.tick_broadcast_bus.add_rx();
 
             //Thread is crushing for some unknown reason
             //Invalid writes to a memory address.
             //The crash only appears when the debugger is active
 
             let entities_ref = self.entity_manager.clone();
+
+            let engine_ref = self.clone();
 
             let worker_handle = thread::spawn(move || {
                 for system in systems.iter_mut() {
@@ -189,10 +246,11 @@ impl Engine {
                 let mut event_buffer: Vec<SystemEvent> = vec![];
                 loop {
                     let tick_time = game_tick_receiver.recv().unwrap();
+                    //println!("Updated: Thread {}", i);
                     let _game_state_events = game_state_receiver.recv().unwrap();
 
                     for system in systems.iter_mut() {
-                        match system.update(tick_time, &entities_ref) {
+                        match system.update(tick_time, &entities_ref, &engine_ref) {
                             Ok(events) => event_buffer.extend(events),
                             Err(_error) => {
                                 //TODO: Log the errors
@@ -206,7 +264,6 @@ impl Engine {
                     if let Ok(_) = system_event_sender
                         .send_timeout(event_buffer.clone(), Duration::from_millis(16))
                     {
-                        println!("Sending was successful");
                         event_buffer.clear();
                     }
                 }
@@ -216,7 +273,7 @@ impl Engine {
                 _join_handle: worker_handle,
             };
 
-            self.systems_manager.workers.push(worker);
+            systems_manager_lock.workers.push(worker);
         }
     }
 
@@ -255,10 +312,10 @@ impl EngineBuilder {
         let mut sys = HardWareSystem::new_all();
         sys.refresh_cpu();
         let mut engine = Engine {
-            systems_manager: SystemManager::new(sys.cpus().len()),
+            systems_manager: Arc::new(RwLock::new(SystemManager::new(sys.cpus().len()))),
             previous_tick: 0,
             entity_manager: Arc::new(RwLock::new(EntityManager::new())),
-            level_manager: self.level_manager.unwrap(),
+            camera: Arc::new(RwLock::new(Camera::new())),
         };
         let temp = self.systems;
         engine.setup_systems(temp);

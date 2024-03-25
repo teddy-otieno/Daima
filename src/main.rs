@@ -8,6 +8,9 @@ mod core;
 mod renderer;
 mod systems;
 
+use systems::assets::AssetLoaderSystem;
+use systems::render::RenderSystem;
+
 use crate::core::engine::EngineBuilder;
 use crate::core::level_manager::StarterLevel;
 use crate::core::system::System;
@@ -19,7 +22,7 @@ fn main() {
             name: "0".to_string(),
         }))
         .add_system(System::RenderSystem(RenderSystem::new()))
-        .set_level_manager(Box::new(StarterLevel {}))
+        .add_system(System::AssetSystem(AssetLoaderSystem::new()))
         .build();
 
     loop {
